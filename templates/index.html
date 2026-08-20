@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#f4f4f1">
+    <title>Codex Bots</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22><rect width=%2264%22 height=%2264%22 rx=%2220%22 fill=%22%237957e8%22/><circle cx=%2224%22 cy=%2228%22 r=%224%22 fill=%22white%22/><circle cx=%2240%22 cy=%2228%22 r=%224%22 fill=%22white%22/><path d=%22M22 43c6 4 14 4 20 0%22 fill=%22none%22 stroke=%22white%22 stroke-width=%224%22 stroke-linecap=%22round%22/></svg>">
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+  </head>
+  <body>
+    <main class="app-shell" aria-label="Codex Bots">
+      <aside class="sidebar" aria-label="Bots">
+        <div class="sidebar-toolbar">
+          <div class="product-mark" aria-label="Codex Bots home">
+            <span class="product-glyph" aria-hidden="true">
+              <svg viewBox="0 0 32 32"><path d="M10.4 5.5a5.6 5.6 0 0 1 9.3-1.2l2 2.8a5.8 5.8 0 0 1 4.4 8.2l-1.5 3.1a5.7 5.7 0 0 1-5 7.9l-3.4-.2a5.8 5.8 0 0 1-8.6-3.5l-.9-3.3a5.7 5.7 0 0 1-.7-10l2.9-1.8 1.5-2Z"/><path d="m11 12 5-3 5 3v6l-5 3-5-3v-6Z"/></svg>
+            </span>
+            <span>Codex Bots</span>
+          </div>
+          <button class="icon-button add-button" id="new-bot-button" type="button" aria-label="Create a new Bot">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+          </button>
+        </div>
+
+        <label class="search-field">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></svg>
+          <span class="sr-only">Search Bots</span>
+          <input id="bot-search" type="search" placeholder="Search" autocomplete="off">
+          <kbd>⌘K</kbd>
+        </label>
+
+        <nav class="bot-list" id="bot-list" aria-label="Your Bots"></nav>
+
+        <div class="sidebar-footer">
+          <button class="runtime-card" id="runtime-card" type="button" aria-label="Codex runtime status">
+            <span class="runtime-dot" aria-hidden="true"></span>
+            <span class="runtime-copy">
+              <strong>Codex CLI</strong>
+              <small id="runtime-label">Checking runtime…</small>
+            </span>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>
+          </button>
+        </div>
+      </aside>
+
+      <section class="chat-panel" aria-label="Conversation">
+        <header class="chat-header" id="chat-header">
+          <button class="icon-button mobile-back" id="mobile-back" type="button" aria-label="Back to Bots">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
+          </button>
+          <div id="header-avatar"></div>
+          <div class="chat-heading">
+            <h1 id="bot-name">Codex Bots</h1>
+            <p id="bot-title">Your local AI team</p>
+          </div>
+          <div class="header-actions">
+            <button class="icon-button" id="bot-info-button" type="button" aria-label="About this Bot">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5h.01"/></svg>
+            </button>
+          </div>
+        </header>
+
+        <div class="conversation" id="conversation" aria-live="polite" aria-busy="false">
+          <div class="conversation-inner" id="messages"></div>
+        </div>
+
+        <div class="composer-region">
+          <div class="attachment-tray" id="attachment-tray" hidden></div>
+          <form class="composer" id="composer">
+            <input id="file-input" type="file" hidden>
+            <button class="composer-button" id="attach-button" type="button" aria-label="Attach a file">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+            </button>
+            <label class="sr-only" for="message-input">Message your Bot</label>
+            <textarea id="message-input" rows="1" maxlength="12000" placeholder="Message your Bot" autocomplete="off"></textarea>
+            <button class="send-button" id="send-button" type="submit" aria-label="Send message">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 12 6-6 6 6M12 6v12"/></svg>
+            </button>
+            <button class="stop-button" id="stop-button" type="button" aria-label="Stop Bot" hidden>
+              <span></span>
+            </button>
+          </form>
+          <p class="composer-note">Codex works locally and may make mistakes. Review important changes.</p>
+        </div>
+      </section>
+    </main>
+
+    <div class="modal-backdrop" id="new-bot-modal" hidden>
+      <section class="modal" role="dialog" aria-modal="true" aria-labelledby="new-bot-title">
+        <div class="modal-header">
+          <div>
+            <p class="eyebrow">New teammate</p>
+            <h2 id="new-bot-title">Create a focused Bot</h2>
+          </div>
+          <button class="icon-button" data-close-modal type="button" aria-label="Close">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
+          </button>
+        </div>
+        <form id="new-bot-form">
+          <label>Bot name<input name="name" maxlength="40" placeholder="e.g. Customer Scout" required></label>
+          <label>One primary job<input name="title" maxlength="70" placeholder="e.g. Customer signals & interviews" required></label>
+          <label>How should it work?<textarea name="description" maxlength="800" rows="4" placeholder="Own customer research. Preserve source links, distinguish evidence from inference, and never contact anyone without approval." required></textarea></label>
+          <fieldset>
+            <legend>Identity</legend>
+            <div class="identity-picker" id="identity-picker">
+              <button class="identity-option selected" type="button" data-color="#2687e9" data-shape="diamond" aria-label="Blue diamond">
+                <span class="bot-avatar diamond" style="--bot-color:#2687e9"><span class="bot-face"></span></span>
+              </button>
+              <button class="identity-option" type="button" data-color="#e34b70" data-shape="orb" aria-label="Pink circle">
+                <span class="bot-avatar orb" style="--bot-color:#e34b70"><span class="bot-face"></span></span>
+              </button>
+              <button class="identity-option" type="button" data-color="#a36d3f" data-shape="hex" aria-label="Brown hexagon">
+                <span class="bot-avatar hex" style="--bot-color:#a36d3f"><span class="bot-face"></span></span>
+              </button>
+            </div>
+          </fieldset>
+          <div class="modal-actions">
+            <button class="secondary-button" data-close-modal type="button">Cancel</button>
+            <button class="primary-button" type="submit">Create Bot</button>
+          </div>
+        </form>
+      </section>
+    </div>
+
+    <aside class="info-drawer" id="info-drawer" aria-hidden="true" inert>
+      <div class="info-drawer-header">
+        <h2>About this Bot</h2>
+        <button class="icon-button" id="close-info" type="button" aria-label="Close Bot information">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
+        </button>
+      </div>
+      <div id="info-content"></div>
+    </aside>
+
+    <div class="toast-region" id="toast-region" aria-live="assertive"></div>
+    <script src="{{ url_for('static', filename='app.js') }}" defer></script>
+  </body>
+</html>

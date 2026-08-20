@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Local app state and Bot-created work
+instance/
+workspace/*
+!workspace/.gitkeep
+
+# Environment and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Editors and operating systems
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Logs
+*.log
+
+# Local visual QA artifacts
+output/
+.playwright-cli/
