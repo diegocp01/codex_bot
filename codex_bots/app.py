@@ -4,16 +4,21 @@ from __future__ import annotations
 
 import os
 import re
+import secrets
 import shutil
 import subprocess
+import uuid
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from flask import Flask, jsonify, render_template, request
 from werkzeug.utils import secure_filename
 
+from .browser_runtime import browser_status
 from .codex_service import CodexService
 from .db import Store
+from .routines import RoutineScheduler, next_run_at, normalize_schedule
 
 ALLOWED_SHAPES = {"orb", "hex", "squircle", "diamond"}
 ALLOWED_COLORS = {"#7957e8", "#0bbf9f", "#ff7a1a", "#e34b70", "#2687e9", "#a36d3f"}
@@ -30,8 +35,13 @@ def create_app(test_config: dict | None = None) -> Flask:
     app.config.from_mapping(
         DATABASE=str(root / "instance" / "codex_bots.sqlite3"),
         BOT_WORKSPACE=str(root / "workspace"),
+        UPLOAD_FOLDER=str(root / "instance" / "uploads"),
         CODEX_MODEL=os.environ.get("CODEX_BOT_MODEL", "gpt-5.6-sol"),
         MAX_CONTENT_LENGTH=25 * 1024 * 1024,
+        REQUEST_TOKEN=os.environ.get("CODEX_BOTS_REQUEST_TOKEN") or secrets.token_urlsafe(32),
+        TRUSTED_HOSTS=["localhost", "127.0.0.1", "::1"],
+        ROUTINE_SCHEDULER_ENABLED=True,
+        LOCAL_TIMEZONE=os.environ.get("CODEX_BOTS_TIMEZONE", "local"),
         SYNC_JOBS=False,
         TEST_RUNNER=None,
     )
@@ -39,6 +49,10 @@ def create_app(test_config: dict | None = None) -> Flask:
         app.config.update(test_config)
 
     Path(app.instance_path).mkdir(parents=True, exist_ok=True)
+    upload_dir = Path(app.config["UPLOAD_FOLDER"])
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    if upload_dir.is_symlink() or not upload_dir.is_dir():
+        raise RuntimeError("UPLOAD_FOLDER must be a real directory, not a symlink.")
     store = Store(app.config["DATABASE"])
     service = CodexService(
         store,
@@ -46,13 +60,43 @@ def create_app(test_config: dict | None = None) -> Flask:
         model=app.config["CODEX_MODEL"],
         synchronous=app.config["SYNC_JOBS"],
         runner=app.config.get("TEST_RUNNER"),
+        browser_root=app.instance_path,
     )
     app.extensions["bot_store"] = store
     app.extensions["codex_service"] = service
+    scheduler = RoutineScheduler(
+        store,
+        service,
+        autostart=app.config["ROUTINE_SCHEDULER_ENABLED"],
+    )
+    app.extensions["routine_scheduler"] = scheduler
+
+    @app.before_request
+    def protect_local_api():
+        if not request.path.startswith("/api/") or request.method in {"GET", "HEAD", "OPTIONS"}:
+            return None
+        supplied = request.headers.get("X-Codex-Bots-Token", "")
+        expected = app.config["REQUEST_TOKEN"]
+        if not supplied or not secrets.compare_digest(supplied, expected):
+            return jsonify({"error": "This request did not come from the active Codex Bots session."}), 403
+        origin = request.headers.get("Origin")
+        if origin:
+            parsed = urlsplit(origin)
+            if parsed.scheme not in {"http", "https"} or parsed.hostname not in {
+                "localhost",
+                "127.0.0.1",
+                "::1",
+            }:
+                return jsonify({"error": "This browser origin is not allowed."}), 403
+        return None
 
     @app.get("/")
     def index():
-        return render_template("index.html", model=app.config["CODEX_MODEL"])
+        return render_template(
+            "index.html",
+            model=app.config["CODEX_MODEL"],
+            request_token=app.config["REQUEST_TOKEN"],
+        )
 
     @app.get("/api/state")
     def state():
@@ -64,7 +108,10 @@ def create_app(test_config: dict | None = None) -> Flask:
                 "bots": [_public_bot(bot) for bot in bots],
                 "selected": _public_bot(selected) if selected else None,
                 "messages": store.get_messages(selected_id) if selected_id else [],
+                "runs": store.list_runs(selected_id, 20) if selected_id else [],
+                "routines": store.list_routines(),
                 "runtime": _runtime_status(app.config["CODEX_MODEL"]),
+                "browser": browser_status(),
             }
         )
 
@@ -104,8 +151,13 @@ def create_app(test_config: dict | None = None) -> Flask:
                 continue
             filename = secure_filename(str(item.get("name") or ""))
             saved_path = Path(str(item.get("path") or "")).resolve()
-            workspace = Path(app.config["BOT_WORKSPACE"]).resolve()
-            if filename and saved_path.is_relative_to(workspace):
+            allowed_roots = (
+                Path(app.config["BOT_WORKSPACE"]).resolve(),
+                Path(app.config["UPLOAD_FOLDER"]).resolve(),
+            )
+            if filename and saved_path.is_file() and any(
+                saved_path.is_relative_to(root) for root in allowed_roots
+            ):
                 safe_attachments.append({"name": filename, "path": str(saved_path)})
 
         display_content = content or "Review the attached file."
@@ -122,10 +174,10 @@ def create_app(test_config: dict | None = None) -> Flask:
                 f"- {item['name']}: {item['path']}" for item in safe_attachments
             )
         try:
-            service.submit(bot_id, display_content + attachment_context)
+            run_id = service.submit(bot_id, display_content + attachment_context)
         except RuntimeError as exc:
             return jsonify({"error": str(exc)}), 409
-        return jsonify({"ok": True}), 202
+        return jsonify({"ok": True, "run_id": run_id}), 202
 
     @app.post("/api/bots/<bot_id>/stop")
     def stop_bot(bot_id: str):
@@ -141,15 +193,77 @@ def create_app(test_config: dict | None = None) -> Flask:
         filename = secure_filename(file.filename)
         if not filename:
             return jsonify({"error": "That filename is not supported."}), 400
-        upload_dir = Path(app.config["BOT_WORKSPACE"]) / "uploads"
-        upload_dir.mkdir(parents=True, exist_ok=True)
-        target = upload_dir / filename
-        stem, suffix, counter = target.stem, target.suffix, 2
-        while target.exists():
-            target = upload_dir / f"{stem}-{counter}{suffix}"
-            counter += 1
-        file.save(target)
-        return jsonify({"name": target.name, "path": str(target.resolve())}), 201
+        upload_dir = Path(app.config["UPLOAD_FOLDER"])
+        if upload_dir.is_symlink() or not upload_dir.is_dir():
+            return jsonify({"error": "The private upload folder is unavailable."}), 503
+        target = upload_dir / f"{uuid.uuid4().hex}-{filename}"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(target, flags, 0o600)
+        try:
+            with os.fdopen(descriptor, "wb") as stream:
+                descriptor = -1
+                file.save(stream)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+        return jsonify({"name": filename, "path": str(target.resolve())}), 201
+
+    @app.post("/api/routines")
+    def create_routine():
+        body = request.get_json(silent=True) or {}
+        bot_id = str(body.get("bot_id") or "")
+        if not store.get_bot(bot_id):
+            return jsonify({"error": "Choose a Bot for this routine."}), 400
+        name = _clean_text(body.get("name"), 70)
+        prompt = _clean_text(body.get("prompt"), 12_000)
+        if not name or not prompt:
+            return jsonify({"error": "Routine name and instructions are required."}), 400
+        try:
+            schedule = normalize_schedule(
+                str(body.get("schedule_kind") or "manual"),
+                str(body.get("time_local") or "09:00"),
+                int(body.get("weekday") or 0),
+                str(body.get("timezone") or app.config["LOCAL_TIMEZONE"]),
+            )
+        except (TypeError, ValueError) as exc:
+            return jsonify({"error": str(exc)}), 400
+        routine = store.create_routine(
+            bot_id=bot_id,
+            name=name,
+            prompt=prompt,
+            schedule=schedule,
+            next_run_at=next_run_at(schedule),
+        )
+        return jsonify(_public_routine(routine)), 201
+
+    @app.post("/api/routines/<routine_id>/run")
+    def run_routine(routine_id: str):
+        try:
+            run_id = scheduler.run_now(routine_id)
+        except LookupError as exc:
+            return jsonify({"error": str(exc)}), 404
+        except RuntimeError as exc:
+            return jsonify({"error": str(exc)}), 409
+        return jsonify({"ok": True, "run_id": run_id}), 202
+
+    @app.post("/api/routines/<routine_id>/enabled")
+    def toggle_routine(routine_id: str):
+        routine = store.get_routine(routine_id)
+        if not routine:
+            return jsonify({"error": "Routine not found."}), 404
+        body = request.get_json(silent=True) or {}
+        enabled = bool(body.get("enabled"))
+        upcoming = next_run_at(routine["schedule"]) if enabled else None
+        updated = store.set_routine_enabled(routine_id, enabled, upcoming)
+        return jsonify(_public_routine(updated))
+
+    @app.delete("/api/routines/<routine_id>")
+    def delete_routine(routine_id: str):
+        if not store.delete_routine(routine_id):
+            return jsonify({"error": "Routine not found."}), 404
+        return jsonify({"ok": True})
 
     @app.get("/api/health")
     def health():
@@ -176,6 +290,13 @@ def _public_bot(bot: dict | None) -> dict | None:
         "updated_at",
     }
     return {key: value for key, value in bot.items() if key in keys}
+
+
+def _public_routine(routine: dict | None) -> dict | None:
+    if not routine:
+        return None
+    hidden = {"lease_until"}
+    return {key: value for key, value in routine.items() if key not in hidden}
 
 
 def _clean_text(value, maximum: int) -> str:

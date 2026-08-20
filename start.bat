@@ -21,10 +21,17 @@ if not exist ".venv\Scripts\python.exe" (
   if errorlevel 1 goto :error
 )
 
-.venv\Scripts\python.exe -c "import flask, openai_codex" >nul 2>nul
+.venv\Scripts\python.exe -c "import flask, openai_codex, mcp, playwright" >nul 2>nul
 if errorlevel 1 (
   echo Installing Codex Bots dependencies...
   .venv\Scripts\python.exe -m pip install -r requirements.txt
+  if errorlevel 1 goto :error
+)
+
+.venv\Scripts\python.exe -c "from codex_bots.browser_runtime import browser_status; raise SystemExit(0 if browser_status()['ready'] else 1)" >nul 2>nul
+if errorlevel 1 (
+  echo Installing the isolated Chromium runtime...
+  .venv\Scripts\python.exe -m playwright install chromium
   if errorlevel 1 goto :error
 )
 
