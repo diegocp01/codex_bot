@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
+import unicodedata
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -67,6 +69,40 @@ class Store:
 
                 CREATE INDEX IF NOT EXISTS idx_messages_bot_created
                     ON messages(bot_id, created_at);
+
+                CREATE TABLE IF NOT EXISTS routines (
+                    id TEXT PRIMARY KEY,
+                    bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+                    name TEXT NOT NULL,
+                    prompt TEXT NOT NULL,
+                    schedule_json TEXT NOT NULL DEFAULT '{}',
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    next_run_at TEXT,
+                    last_run_at TEXT,
+                    last_status TEXT NOT NULL DEFAULT 'never',
+                    lease_until TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_routines_due
+                    ON routines(enabled, next_run_at);
+
+                CREATE TABLE IF NOT EXISTS runs (
+                    id TEXT PRIMARY KEY,
+                    bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+                    routine_id TEXT REFERENCES routines(id) ON DELETE SET NULL,
+                    trigger TEXT NOT NULL,
+                    prompt TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    error TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    started_at TEXT,
+                    finished_at TEXT
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_runs_bot_created
+                    ON runs(bot_id, created_at DESC);
                 """
             )
             count = db.execute("SELECT COUNT(*) FROM bots").fetchone()[0]
@@ -100,6 +136,28 @@ class Store:
                         kind="welcome",
                         created_at=now,
                     )
+            interrupted = db.execute(
+                "SELECT DISTINCT bot_id FROM runs WHERE status IN ('queued', 'working', 'stopping')"
+            ).fetchall()
+            if interrupted:
+                now = utc_now()
+                db.execute(
+                    """
+                    UPDATE runs SET status = 'interrupted',
+                        error = 'The local worker stopped before this run finished.',
+                        finished_at = ?
+                    WHERE status IN ('queued', 'working', 'stopping')
+                    """,
+                    (now,),
+                )
+                for row in interrupted:
+                    db.execute(
+                        """
+                        UPDATE bots SET status = 'error', status_text = 'Interrupted by restart',
+                            updated_at = ? WHERE id = ?
+                        """,
+                        (now, row["bot_id"]),
+                    )
 
     def list_bots(self) -> list[dict]:
         with self.connect() as db:
@@ -130,7 +188,8 @@ class Store:
         color: str,
         shape: str,
     ) -> dict:
-        base = "-".join(name.lower().strip().split()) or "new-bot"
+        normalized = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii")
+        base = re.sub(r"[^a-z0-9]+", "-", normalized.lower()).strip("-")[:60] or "new-bot"
         bot_id = base
         suffix = 2
         while self.get_bot(bot_id):
@@ -268,3 +327,175 @@ class Store:
                 "UPDATE bots SET codex_thread_id = ?, updated_at = ? WHERE id = ?",
                 (thread_id, utc_now(), bot_id),
             )
+
+    def create_run(
+        self,
+        *,
+        bot_id: str,
+        prompt: str,
+        trigger: str = "user",
+        routine_id: str | None = None,
+    ) -> dict:
+        run_id = str(uuid.uuid4())
+        now = utc_now()
+        with self.connect() as db:
+            db.execute(
+                """
+                INSERT INTO runs (
+                    id, bot_id, routine_id, trigger, prompt, status, created_at
+                ) VALUES (?, ?, ?, ?, ?, 'queued', ?)
+                """,
+                (run_id, bot_id, routine_id, trigger, prompt, now),
+            )
+        return self.get_run(run_id) or {}
+
+    def get_run(self, run_id: str) -> dict | None:
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM runs WHERE id = ?", (run_id,)).fetchone()
+        return dict(row) if row else None
+
+    def list_runs(self, bot_id: str | None = None, limit: int = 30) -> list[dict]:
+        with self.connect() as db:
+            if bot_id:
+                rows = db.execute(
+                    "SELECT * FROM runs WHERE bot_id = ? ORDER BY created_at DESC LIMIT ?",
+                    (bot_id, limit),
+                ).fetchall()
+            else:
+                rows = db.execute(
+                    "SELECT * FROM runs ORDER BY created_at DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+        return [dict(row) for row in rows]
+
+    def set_run_status(self, run_id: str, status: str, error: str = "") -> None:
+        now = utc_now()
+        started_at = now if status == "working" else None
+        finished_at = now if status in {"completed", "failed", "stopped", "interrupted"} else None
+        with self.connect() as db:
+            db.execute(
+                """
+                UPDATE runs SET status = ?, error = ?,
+                    started_at = COALESCE(started_at, ?),
+                    finished_at = COALESCE(?, finished_at)
+                WHERE id = ?
+                """,
+                (status, error, started_at, finished_at, run_id),
+            )
+
+    def create_routine(
+        self,
+        *,
+        bot_id: str,
+        name: str,
+        prompt: str,
+        schedule: dict,
+        next_run_at: str | None,
+    ) -> dict:
+        routine_id = str(uuid.uuid4())
+        now = utc_now()
+        enabled = 0 if schedule.get("kind") == "manual" else 1
+        with self.connect() as db:
+            db.execute(
+                """
+                INSERT INTO routines (
+                    id, bot_id, name, prompt, schedule_json, enabled,
+                    next_run_at, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    routine_id,
+                    bot_id,
+                    name,
+                    prompt,
+                    json.dumps(schedule),
+                    enabled,
+                    next_run_at,
+                    now,
+                    now,
+                ),
+            )
+        return self.get_routine(routine_id) or {}
+
+    def get_routine(self, routine_id: str) -> dict | None:
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM routines WHERE id = ?", (routine_id,)).fetchone()
+        return self._routine_dict(row) if row else None
+
+    def list_routines(self) -> list[dict]:
+        with self.connect() as db:
+            rows = db.execute(
+                """
+                SELECT r.*, b.name AS bot_name, b.color AS bot_color, b.shape AS bot_shape
+                FROM routines r JOIN bots b ON b.id = r.bot_id
+                ORDER BY r.created_at DESC
+                """
+            ).fetchall()
+        return [self._routine_dict(row) for row in rows]
+
+    def set_routine_enabled(
+        self,
+        routine_id: str,
+        enabled: bool,
+        next_run_at: str | None,
+    ) -> dict | None:
+        with self.connect() as db:
+            db.execute(
+                """
+                UPDATE routines SET enabled = ?, next_run_at = ?, lease_until = NULL,
+                    updated_at = ? WHERE id = ?
+                """,
+                (int(enabled), next_run_at if enabled else None, utc_now(), routine_id),
+            )
+        return self.get_routine(routine_id)
+
+    def delete_routine(self, routine_id: str) -> bool:
+        with self.connect() as db:
+            cursor = db.execute("DELETE FROM routines WHERE id = ?", (routine_id,))
+        return cursor.rowcount > 0
+
+    def claim_due_routines(self, now: str, lease_until: str, limit: int = 5) -> list[dict]:
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            rows = db.execute(
+                """
+                SELECT * FROM routines
+                WHERE enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= ?
+                    AND (lease_until IS NULL OR lease_until <= ?)
+                ORDER BY next_run_at ASC LIMIT ?
+                """,
+                (now, now, limit),
+            ).fetchall()
+            for row in rows:
+                db.execute(
+                    "UPDATE routines SET lease_until = ?, updated_at = ? WHERE id = ?",
+                    (lease_until, now, row["id"]),
+                )
+        return [self._routine_dict(row) for row in rows]
+
+    def advance_routine(self, routine_id: str, next_run_at: str | None) -> None:
+        with self.connect() as db:
+            db.execute(
+                """
+                UPDATE routines SET next_run_at = ?, lease_until = NULL, updated_at = ?
+                WHERE id = ?
+                """,
+                (next_run_at, utc_now(), routine_id),
+            )
+
+    def set_routine_result(self, routine_id: str, status: str) -> None:
+        with self.connect() as db:
+            db.execute(
+                """
+                UPDATE routines SET last_run_at = ?, last_status = ?, lease_until = NULL,
+                    updated_at = ? WHERE id = ?
+                """,
+                (utc_now(), status, utc_now(), routine_id),
+            )
+
+    @staticmethod
+    def _routine_dict(row: sqlite3.Row) -> dict:
+        item = dict(row)
+        item["schedule"] = json.loads(item.pop("schedule_json") or "{}")
+        item["enabled"] = bool(item["enabled"])
+        return item

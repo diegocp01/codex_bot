@@ -4,6 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#f4f4f1">
+    <meta name="codex-bots-request-token" content="{{ request_token }}">
     <title>Codex Bots</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22><rect width=%2264%22 height=%2264%22 rx=%2220%22 fill=%22%237957e8%22/><circle cx=%2224%22 cy=%2228%22 r=%224%22 fill=%22white%22/><circle cx=%2240%22 cy=%2228%22 r=%224%22 fill=%22white%22/><path d=%22M22 43c6 4 14 4 20 0%22 fill=%22none%22 stroke=%22white%22 stroke-width=%224%22 stroke-linecap=%22round%22/></svg>">
     <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
@@ -18,9 +19,14 @@
             </span>
             <span>Codex Bots</span>
           </div>
-          <button class="icon-button add-button" id="new-bot-button" type="button" aria-label="Create a new Bot">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
-          </button>
+          <div class="sidebar-actions">
+            <button class="icon-button" id="routines-button" type="button" aria-label="Open routines">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>
+            </button>
+            <button class="icon-button add-button" id="new-bot-button" type="button" aria-label="Create a new Bot">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+            </button>
+          </div>
         </div>
 
         <label class="search-field">
@@ -132,6 +138,68 @@
       </div>
       <div id="info-content"></div>
     </aside>
+
+    <aside class="info-drawer routines-drawer" id="routines-drawer" aria-hidden="true" inert>
+      <div class="info-drawer-header">
+        <div>
+          <p class="eyebrow">Local automation</p>
+          <h2>Routines</h2>
+        </div>
+        <div class="drawer-actions">
+          <button class="icon-button" id="new-routine-button" type="button" aria-label="Create a routine">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+          </button>
+          <button class="icon-button" id="close-routines" type="button" aria-label="Close routines">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
+          </button>
+        </div>
+      </div>
+      <p class="drawer-note">Runs on this computer. Scheduled work requires Codex Bots to stay open.</p>
+      <div class="browser-ready-card" id="browser-ready-card">
+        <span class="browser-ready-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="15" rx="3"/><path d="M3 9h18M7 6.5h.01M10 6.5h.01"/></svg>
+        </span>
+        <span><strong>Bot browser</strong><small id="browser-ready-label">Checking Chromium…</small></span>
+      </div>
+      <div class="routine-list" id="routine-list"></div>
+    </aside>
+
+    <div class="modal-backdrop" id="routine-modal" hidden>
+      <section class="modal" role="dialog" aria-modal="true" aria-labelledby="routine-modal-title">
+        <div class="modal-header">
+          <div>
+            <p class="eyebrow">Repeatable work</p>
+            <h2 id="routine-modal-title">Create a routine</h2>
+          </div>
+          <button class="icon-button" data-close-modal type="button" aria-label="Close">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
+          </button>
+        </div>
+        <form id="routine-form">
+          <label>Routine name<input name="name" maxlength="70" placeholder="e.g. Morning evidence brief" required></label>
+          <label>Bot<select name="bot_id" id="routine-bot" required></select></label>
+          <label>What should it do?<textarea name="prompt" maxlength="12000" rows="5" placeholder="Review the workspace, summarize what changed, and list the three decisions that need my attention." required></textarea></label>
+          <label>Run<select name="schedule_kind" id="routine-schedule">
+            <option value="manual">On demand</option>
+            <option value="hourly">Every hour</option>
+            <option value="daily">Every day</option>
+            <option value="weekdays">Weekdays</option>
+            <option value="weekly">Every week</option>
+          </select></label>
+          <div class="schedule-fields" id="schedule-fields" hidden>
+            <label id="routine-weekday-label" hidden>Day<select name="weekday">
+              <option value="0">Monday</option><option value="1">Tuesday</option><option value="2">Wednesday</option>
+              <option value="3">Thursday</option><option value="4">Friday</option><option value="5">Saturday</option><option value="6">Sunday</option>
+            </select></label>
+            <label>Local time<input name="time_local" type="time" value="09:00"></label>
+          </div>
+          <div class="modal-actions">
+            <button class="secondary-button" data-close-modal type="button">Cancel</button>
+            <button class="primary-button" type="submit">Create routine</button>
+          </div>
+        </form>
+      </section>
+    </div>
 
     <div class="toast-region" id="toast-region" aria-live="assertive"></div>
     <script src="{{ url_for('static', filename='app.js') }}" defer></script>

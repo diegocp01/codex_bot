@@ -8,15 +8,28 @@ import os
 import shutil
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from openai_codex import ApprovalMode, Codex, CodexConfig, Sandbox
 
+from .browser_runtime import browser_config_overrides, browser_status
 from .db import Store
-from .roles import BOT_OUTPUT_SCHEMA, build_instructions
+from .roles import build_instructions, build_output_schema
 
 LOGGER = logging.getLogger(__name__)
+
+
+class RunStopped(Exception):
+    """Raised when the user stops a run before it returns a result."""
+
+
+@dataclass(slots=True)
+class ActiveRun:
+    run_id: str
+    turn: Any = None
+    cancel_requested: bool = False
 
 
 class CodexService:
@@ -31,6 +44,7 @@ class CodexService:
         max_workers: int = 3,
         synchronous: bool = False,
         runner=None,
+        browser_root: str | Path | None = None,
     ) -> None:
         self.store = store
         self.workspace = Path(workspace).resolve()
@@ -38,8 +52,9 @@ class CodexService:
         self.model = model
         self.synchronous = synchronous
         self.runner = runner or self._run_with_sdk
+        self.browser_root = Path(browser_root or self.workspace.parent / "instance").resolve()
         self.executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="codex-bot")
-        self._active: dict[str, Any] = {}
+        self._active: dict[str, ActiveRun] = {}
         self._lock = threading.RLock()
 
     def submit(
@@ -49,26 +64,49 @@ class CodexService:
         *,
         origin_bot_id: str | None = None,
         depth: int = 0,
-    ) -> None:
+        trigger: str = "user",
+        routine_id: str | None = None,
+    ) -> str:
+        run = self.store.create_run(
+            bot_id=bot_id,
+            prompt=prompt,
+            trigger=trigger,
+            routine_id=routine_id,
+        )
+        run_id = run["id"]
         with self._lock:
             if bot_id in self._active:
+                self.store.set_run_status(run_id, "failed", "This Bot is already working.")
                 raise RuntimeError("This Bot is already working.")
-            self._active[bot_id] = None
+            self._active[bot_id] = ActiveRun(run_id=run_id)
         self.store.set_status(bot_id, "working", "Thinking with Codex")
-        args = (bot_id, prompt, origin_bot_id, depth)
+        args = (bot_id, prompt, origin_bot_id, depth, run_id, routine_id)
         if self.synchronous:
             self._execute(*args)
         else:
-            self.executor.submit(self._execute, *args)
+            try:
+                self.executor.submit(self._execute, *args)
+            except Exception:
+                with self._lock:
+                    self._active.pop(bot_id, None)
+                self.store.set_run_status(run_id, "failed", "The local worker could not start.")
+                self.store.set_status(bot_id, "error", "Could not start")
+                raise
+        return run_id
 
     def interrupt(self, bot_id: str) -> bool:
         with self._lock:
             handle = self._active.get(bot_id)
-        if handle is None:
-            return bot_id in self._active
+            if handle:
+                handle.cancel_requested = True
+        if not handle:
+            return False
+        self.store.set_run_status(handle.run_id, "stopping")
+        self.store.set_status(bot_id, "working", "Stopping")
+        if handle.turn is None:
+            return True
         try:
-            handle.interrupt()
-            self.store.set_status(bot_id, "working", "Stopping")
+            handle.turn.interrupt()
             return True
         except Exception:
             LOGGER.exception("Failed to interrupt Bot %s", bot_id)
@@ -84,12 +122,23 @@ class CodexService:
         prompt: str,
         origin_bot_id: str | None,
         depth: int,
+        run_id: str,
+        routine_id: str | None,
     ) -> None:
-        bot = self.store.get_bot(bot_id)
-        if not bot:
-            return
         try:
+            bot = self.store.get_bot(bot_id)
+            if not bot:
+                raise RuntimeError("Bot not found.")
+            with self._lock:
+                active = self._active.get(bot_id)
+                if not active or active.cancel_requested:
+                    raise RunStopped()
+            self.store.set_run_status(run_id, "working")
             payload = self.runner(bot, prompt, depth)
+            with self._lock:
+                active = self._active.get(bot_id)
+                if active and active.cancel_requested:
+                    raise RunStopped()
             message = str(payload.get("message") or "I finished, but did not return a summary.").strip()
             self.store.add_message(
                 bot_id=bot_id,
@@ -108,6 +157,21 @@ class CodexService:
                 )
             if depth < 2:
                 self._dispatch_handoffs(bot, payload.get("handoffs") or [], depth)
+            self.store.set_run_status(run_id, "completed")
+            if routine_id:
+                self.store.set_routine_result(routine_id, "completed")
+            self.store.set_status(bot_id, "idle", "")
+        except RunStopped:
+            self.store.add_message(
+                bot_id=bot_id,
+                role="system",
+                author_name="Codex Bots",
+                content="This run was stopped before completion.",
+                kind="stopped",
+            )
+            self.store.set_run_status(run_id, "stopped")
+            if routine_id:
+                self.store.set_routine_result(routine_id, "stopped")
             self.store.set_status(bot_id, "idle", "")
         except Exception as exc:
             LOGGER.exception("Codex Bot %s failed", bot_id)
@@ -128,6 +192,9 @@ class CodexService:
                     kind="error",
                 )
             self.store.set_status(bot_id, "error", "Needs attention")
+            self.store.set_run_status(run_id, "failed", str(exc).strip() or type(exc).__name__)
+            if routine_id:
+                self.store.set_routine_result(routine_id, "failed")
         finally:
             with self._lock:
                 self._active.pop(bot_id, None)
@@ -139,12 +206,23 @@ class CodexService:
 
         teammate_context = self.store.recent_teammate_context(bot["id"])
         context_block = f"\n\nRecent teammate context:\n{teammate_context}" if teammate_context else ""
+        teammates = self.store.list_bots()
         instructions = build_instructions(
             bot,
             str(self.workspace),
             allow_handoffs=depth < 2,
+            teammates=teammates,
         )
-        config = CodexConfig(codex_bin=codex_bin, cwd=str(self.workspace))
+        overrides = (
+            browser_config_overrides(bot["id"], self.browser_root)
+            if browser_status()["ready"]
+            else ()
+        )
+        config = CodexConfig(
+            codex_bin=codex_bin,
+            cwd=str(self.workspace),
+            config_overrides=overrides,
+        )
         with Codex(config) as codex:
             if bot.get("codex_thread_id"):
                 try:
@@ -167,10 +245,16 @@ class CodexService:
                 model=self.model,
                 sandbox=Sandbox.workspace_write,
                 approval_mode=ApprovalMode.auto_review,
-                output_schema=BOT_OUTPUT_SCHEMA,
+                output_schema=build_output_schema([item["id"] for item in teammates]),
             )
             with self._lock:
-                self._active[bot["id"]] = turn
+                active = self._active.get(bot["id"])
+                if not active:
+                    raise RunStopped()
+                active.turn = turn
+                cancel_requested = active.cancel_requested
+            if cancel_requested:
+                raise RunStopped()
             result = turn.run()
             raw = result.final_response or "{}"
             try:
@@ -227,6 +311,7 @@ class CodexService:
                 f"Handoff from {source_bot['name']}:\n{task}\n\nComplete this focused assignment and report back.",
                 origin_bot_id=source_bot["id"],
                 depth=depth + 1,
+                trigger="handoff",
             )
 
     @staticmethod

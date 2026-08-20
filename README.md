@@ -15,8 +15,11 @@ Codex Bots turns durable Codex threads into named teammates with one clear job. 
   - **Product Builder** for implementation, testing, and reviewable artifacts
 - One persistent Codex SDK thread per Bot
 - Visible asynchronous Bot-to-Bot handoffs
+- Local routines that run on demand, hourly, daily, on weekdays, or weekly
+- Durable run history with clean restart recovery and reliable stop controls
+- An isolated Playwright/Chromium browser profile for every Bot, exposed through a local MCP server
 - A shared local `workspace/` where Bots can create and review files
-- File attachments, custom Bot creation, search, responsive mobile layout, and stop controls
+- File attachments, custom Bot creation, search, responsive mobile layout, and keyboard-accessible dialogs
 - SQLite conversation persistence stored only on the local machine
 - GPT-5.6 Sol by default, configurable with `CODEX_BOT_MODEL`
 
@@ -70,6 +73,7 @@ Double-click `start.bat` or run it from Command Prompt. The launcher creates `.v
 python3 -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
+python -m playwright install chromium
 python app.py
 ```
 
@@ -84,8 +88,10 @@ Environment variables:
 | `CODEX_BOTS_PORT` | `5055` | Local Flask port |
 | `CODEX_BOTS_HOST` | `127.0.0.1` | Bind address |
 | `CODEX_BOTS_OPEN_BROWSER` | `0` | Open the UI after startup when set to `1` |
+| `CODEX_BOTS_BROWSER_VISIBLE` | `0` | Show the isolated Chromium window for local user takeover |
+| `CODEX_BOTS_TIMEZONE` | `local` | Fallback timezone for non-browser routine creation |
 
-The included launchers set `CODEX_BOTS_OPEN_BROWSER=1`.
+The included launchers set `CODEX_BOTS_OPEN_BROWSER=1`. They also install Playwright's isolated Chromium runtime the first time it is needed.
 
 ## How it works
 
@@ -102,16 +108,26 @@ When a Bot requests a teammate:
 
 Handoff depth is bounded to prevent runaway delegation.
 
+### Routines
+
+Open the clock button beside the Codex Bots logo to create repeatable work. A routine keeps the same simple contract regardless of where it eventually runs: a name, a Bot, instructions, a schedule, and the browser's IANA timezone. Today the scheduler and worker are local, so the app must remain open for scheduled work. The durable routine and run records are intentionally separate from the worker implementation, which lets a hosted worker replace the local one later without changing the interface or shifting its scheduled local time.
+
+### Bot browser
+
+When Chromium is ready, Codex receives a local `codex_bots_browser` MCP toolset for the active Bot. It can open public pages, inspect accessible text and element references, click and type, press keys, and request screenshots for visual inspection. Each Bot gets its own persistent profile under `instance/browser_profiles/`.
+
+This is a controlled browser harness, not unrestricted remote desktop access. It blocks private-network navigation, downloads, password entry, and clicks that appear to purchase, publish, delete, transfer, or submit consequential actions. Those steps remain with the user. The browser process runs locally today; the same MCP boundary can point at Chromium inside an isolated hosted VM later.
+
 ## Local data and safety
 
-- Conversation metadata is stored in `instance/`, which is ignored by Git.
-- Bot artifacts and uploaded files are stored in `workspace/`, also ignored by Git.
+- Conversation metadata, private uploads, run history, routines, and Bot browser profiles are stored in `instance/`, which is ignored by Git.
+- Bot-created artifacts are stored in `workspace/`, also ignored by Git.
 - The app never asks for or stores an OpenAI API key.
-- Codex still uses the permissions, MCP servers, rules, and authentication configured for the local user.
+- Codex still uses the permissions, rules, and authentication configured for the local user. The Bot browser MCP is added only to the Bot's Codex process.
 - Bots run with workspace-scoped write access by default, not full filesystem access.
 - Always review important edits and external actions. An AI agent can still misunderstand a request.
 
-Do not expose this development server directly to the internet. It has no multi-user authentication and is designed for one trusted user on localhost.
+Do not expose this development server directly to the internet. It has localhost request defenses, but no multi-user account system and is designed for one trusted user on one machine.
 
 ## Development
 
@@ -131,7 +147,7 @@ Pull requests run the same checks on Python 3.10 and the current Python release 
 
 ## Project status
 
-This is a local-first beta. Browser/computer viewing and scheduled routines are intentionally excluded from the first public version because those features require an always-on or cloud execution layer. The architecture keeps those surfaces separable for a later release.
+This is a local-first beta. Routines and isolated browser control now work on the local machine. An always-on hosted VM worker, cross-device notifications, user takeover of a visible cloud browser, and managed secrets are future deployment work rather than features claimed by this repository.
 
 ## License
 

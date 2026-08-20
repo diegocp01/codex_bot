@@ -22,6 +22,8 @@ jobs:
           cache: pip
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
+      - name: Install isolated Chromium
+        run: python -m playwright install chromium
       - name: Compile Python
         run: python -m compileall -q app.py codex_bots tests
       - name: Run tests
